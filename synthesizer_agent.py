@@ -12,21 +12,17 @@
 # replacing llm_request.contents keeps earlier iterations, the Manager's plan and
 # Search's tool traffic out of the prompt.
 #
-# Evidence reader. The default reader follows the EVIDENCE table in SDD 6.2:
-# integer evidence_id, source_url, source_title, published_date, passage,
-# source_type. It does NOT read the table search_agent.py creates today (string
-# IDs, raw_content, title, url). That mismatch is README open item 5. When the
-# evidence store module exists, move sqlite_evidence_reader into it and pass the
-# result to build_synthesizer_agent(evidence_reader=...).
-import json
+# Evidence reader. build_synthesizer_agent takes any function from a list of
+# evidence IDs to StoredEvidence rows. The default is EvidenceStore().read_evidence
+# (evidence_store.py, SDD 6.2).
 import re
-import sqlite3
-from typing import NamedTuple
 
 from dotenv import load_dotenv
 from google.adk.agents import LlmAgent
 from google.genai import types
 
+from evidence_store import EvidenceStore
+from evidence_store import StoredEvidence
 from manager_agent import count_model_call
 from manager_agent import get_model_id
 from schemas import DraftReport
@@ -67,56 +63,9 @@ class EvidenceError(ValueError):
     pass
 
 
-# One row of the EVIDENCE table, as the Synthesizer needs it
-class StoredEvidence(NamedTuple):
-    evidence_id: int
-    source_type: str
-    source_title: str
-    source_url: str
-    published_date: str
-    passage: str
-
-
 # ---------------------------------------------------------------------------
 # Reading evidence (SDD 6.2)
 # ---------------------------------------------------------------------------
-
-# Builds a reader that resolves integer evidence IDs to rows of the evidence
-# table. Rows that do not exist are simply absent from the result.
-def sqlite_evidence_reader(db_path=None):
-    def read(evidence_ids):
-        path = db_path
-        if path is None:
-            from search_agent import DB_PATH
-            path = DB_PATH
-        ids = []
-        for evidence_id in evidence_ids:
-            ids.append(int(evidence_id))
-        if not ids:
-            return []
-        marks = ",".join("?" * len(ids))
-        query = (
-            "SELECT evidence_id, source_type, source_title, source_url, "
-            "published_date, passage FROM evidence "
-            f"WHERE evidence_id IN ({marks})"
-        )
-        conn = sqlite3.connect(path)
-        try:
-            found = conn.execute(query, ids).fetchall()
-        finally:
-            conn.close()
-        rows = []
-        for item in found:
-            rows.append(StoredEvidence(
-                evidence_id=int(item[0]),
-                source_type=item[1] or "",
-                source_title=item[2] or "",
-                source_url=item[3] or "",
-                published_date=item[4] or "",
-                passage=item[5] or "",
-            ))
-        return rows
-    return read
 
 # Looks up every ID and fails closed if any is missing from the store
 def load_evidence(evidence_ids, evidence_reader):
@@ -370,7 +319,7 @@ def build_instruction():
 # Builds the Synthesizer LlmAgent. No tools: the evidence is supplied by the callback.
 def build_synthesizer_agent(evidence_reader=None):
     if evidence_reader is None:
-        evidence_reader = sqlite_evidence_reader()
+        evidence_reader = EvidenceStore().read_evidence
     return LlmAgent(
         name=SYNTHESIZER_AGENT_NAME,
         model=get_model_id(),
